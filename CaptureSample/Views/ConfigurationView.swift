@@ -1,5 +1,5 @@
 /*
-See LICENSE folder for this sample’s licensing information.
+See the LICENSE.txt file for this sample’s licensing information.
 
 Abstract:
 A view that provides the UI to configure screen capture.
@@ -19,6 +19,7 @@ struct ConfigurationView: View {
     @StateObject private var audioPlayer = AudioPlayer()
     @ObservedObject var screenRecorder: ScreenRecorder
     @Binding var userStopped: Bool
+    @State var showPickerSettingsView = false
     
     var body: some View {
         VStack {
@@ -63,7 +64,7 @@ struct ConfigurationView: View {
                 
                 Toggle("Exclude sample app from stream", isOn: $screenRecorder.isAppExcluded)
                     .disabled(screenRecorder.captureType == .window)
-                    .onChange(of: screenRecorder.isAppExcluded) { _ in
+                    .onChange(of: screenRecorder.isAppExcluded) {
                         // Capturing app audio is only possible when the sample is included in the stream.
                         // Ensure the audio stops playing if the user enables the "Exclude app from stream" checkbox.
                         if screenRecorder.isAppExcluded {
@@ -91,7 +92,28 @@ struct ConfigurationView: View {
                     Text("\(!audioPlayer.isPlaying ? "Play" : "Stop") App Audio")
                 }
                 .disabled(screenRecorder.isAppExcluded)
+                
+                // Picker section.
                 Spacer()
+                    .frame(height: 20)
+                
+                HeaderView("Content Picker")
+                Toggle("Activate Picker", isOn: $screenRecorder.isPickerActive)
+                Group {
+                    Button {
+                        showPickerSettingsView = true
+                    } label: {
+                        Image(systemName: "text.badge.plus")
+                        Text("Picker Configuration")
+                    }
+                    Button {
+                        screenRecorder.presentPicker()
+                    } label: {
+                        Image(systemName: "sparkles.tv")
+                        Text("Present Picker")
+                    }
+                }
+                .disabled(!screenRecorder.isPickerActive)
             }
             .padding()
             
@@ -113,15 +135,33 @@ struct ConfigurationView: View {
                     withAnimation(Animation.easeOut(duration: 0.25)) {
                         userStopped = true
                     }
-                    
+
                 } label: {
                     Text("Stop Capture")
                 }
                 .disabled(!screenRecorder.isRunning)
             }
             .frame(maxWidth: .infinity, minHeight: 60)
+            .onChange(of: screenRecorder.pickerUpdate) {
+                if !screenRecorder.isRunning {
+                    // start
+                    Task { await screenRecorder.start() }
+                    // Fades the paused screen out.
+                    withAnimation(Animation.easeOut(duration: 0.25)) {
+                        userStopped = false
+                    }
+                } else {
+
+                }
+            }
         }
         .background(MaterialView())
+        .sheet(isPresented: $showPickerSettingsView) {
+            PickerSettingsView(screenRecorder: screenRecorder)
+                .frame(minWidth: 500.0, maxWidth: .infinity, minHeight: 600.0, maxHeight: .infinity)
+                .padding(.top, 7)
+                .padding(.leading, 25)
+        }
     }
 }
 

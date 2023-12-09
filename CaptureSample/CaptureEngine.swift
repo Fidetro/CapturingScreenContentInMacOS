@@ -1,10 +1,9 @@
 /*
-See LICENSE folder for this sample’s licensing information.
+See the LICENSE.txt file for this sample’s licensing information.
 
 Abstract:
 An object that captures a stream of captured sample buffers containing screen and audio content.
 */
-
 import Foundation
 import AVFAudio
 import ScreenCaptureKit
@@ -14,7 +13,7 @@ import Combine
 /// A structure that contains the video data to render.
 struct CapturedFrame {
     static let invalid = CapturedFrame(surface: nil, contentRect: .zero, contentScale: 0, scaleFactor: 0)
-    
+
     let surface: IOSurface?
     let contentRect: CGRect
     let contentScale: CGFloat
@@ -26,8 +25,9 @@ struct CapturedFrame {
 class CaptureEngine: NSObject, @unchecked Sendable {
     
     private let logger = Logger()
-    
-    private var stream: SCStream?
+
+    private(set) var stream: SCStream?
+    private var streamOutput: CaptureEngineStreamOutput?
     private let videoSampleBufferQueue = DispatchQueue(label: "com.example.apple-samplecode.VideoSampleBufferQueue")
     private let audioSampleBufferQueue = DispatchQueue(label: "com.example.apple-samplecode.AudioSampleBufferQueue")
     
@@ -41,11 +41,12 @@ class CaptureEngine: NSObject, @unchecked Sendable {
     /// - Tag: StartCapture
     func startCapture(configuration: SCStreamConfiguration, filter: SCContentFilter) -> AsyncThrowingStream<CapturedFrame, Error> {
         AsyncThrowingStream<CapturedFrame, Error> { continuation in
-            // The stream output object.
+            // The stream output object. Avoid reassigning it to a new object every time startCapture is called.
             let streamOutput = CaptureEngineStreamOutput(continuation: continuation)
+            self.streamOutput = streamOutput
             streamOutput.capturedFrameHandler = { continuation.yield($0) }
             streamOutput.pcmBufferHandler = { self.powerMeter.process(buffer: $0) }
-            
+
             do {
                 stream = SCStream(filter: filter, configuration: configuration, delegate: streamOutput)
                 
@@ -86,7 +87,7 @@ private class CaptureEngineStreamOutput: NSObject, SCStreamOutput, SCStreamDeleg
     var pcmBufferHandler: ((AVAudioPCMBuffer) -> Void)?
     var capturedFrameHandler: ((CapturedFrame) -> Void)?
     
-    // Store the the startCapture continuation, so you can cancel it if an error occurs.
+    // Store the  startCapture continuation, so you can cancel it if an error occurs.
     private var continuation: AsyncThrowingStream<CapturedFrame, Error>.Continuation?
     
     init(continuation: AsyncThrowingStream<CapturedFrame, Error>.Continuation?) {
@@ -106,9 +107,8 @@ private class CaptureEngineStreamOutput: NSObject, SCStreamOutput, SCStreamDeleg
             guard let frame = createFrame(for: sampleBuffer) else { return }
             capturedFrameHandler?(frame)
         case .audio:
-            // Create an AVAudioPCMBuffer from an audio sample buffer.
-            guard let samples = createPCMBuffer(for: sampleBuffer) else { return }
-            pcmBufferHandler?(samples)
+            // Process audio as an AVAudioPCMBuffer for level calculation.
+            handleAudio(for: sampleBuffer)
         @unknown default:
             fatalError("Encountered unknown stream output type: \(outputType)")
         }
@@ -148,16 +148,15 @@ private class CaptureEngineStreamOutput: NSObject, SCStreamOutput, SCStreamDeleg
         return frame
     }
     
-    // Creates an AVAudioPCMBuffer instance on which to perform an average and peak audio level calculation.
-    private func createPCMBuffer(for sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
-        var ablPointer: UnsafePointer<AudioBufferList>?
-        try? sampleBuffer.withAudioBufferList { audioBufferList, blockBuffer in
-            ablPointer = audioBufferList.unsafePointer
+    private func handleAudio(for buffer: CMSampleBuffer) -> Void? {
+        // Create an AVAudioPCMBuffer from an audio sample buffer.
+        try? buffer.withAudioBufferList { audioBufferList, blockBuffer in
+            guard let description = buffer.formatDescription?.audioStreamBasicDescription,
+                  let format = AVAudioFormat(standardFormatWithSampleRate: description.mSampleRate, channels: description.mChannelsPerFrame),
+                  let samples = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: audioBufferList.unsafePointer)
+            else { return }
+            pcmBufferHandler?(samples)
         }
-        guard let audioBufferList = ablPointer,
-              let absd = sampleBuffer.formatDescription?.audioStreamBasicDescription,
-              let format = AVAudioFormat(standardFormatWithSampleRate: absd.mSampleRate, channels: absd.mChannelsPerFrame) else { return nil }
-        return AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: audioBufferList)
     }
     
     func stream(_ stream: SCStream, didStopWithError error: Error) {

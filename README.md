@@ -3,18 +3,19 @@ Stream desktop content like displays, apps, and windows by adopting screen captu
 
 ## Overview
 This sample shows how to add high-performance screen capture to your Mac app by using [`ScreenCaptureKit`][1]. The sample explores how to create content filters to capture the displays, apps, and windows you choose. It then shows how to configure your stream output, retrieve video frames and audio samples, and update a running stream.
-- Note: This sample code project is associated with WWDC22 sessions [10156: Meet ScreenCaptureKit](https://developer.apple.com/wwdc22/10156) and [10155: Take ScreenCaptureKit to the next level](https://developer.apple.com/wwdc22/10155)
+
+- Note: This sample code project is associated with WWDC22 [Session 10156: Meet ScreenCaptureKit](https://developer.apple.com/wwdc22/10156) and [Session 10155: Take ScreenCaptureKit to the next level](https://developer.apple.com/wwdc22/10155)
 
 ## Configure the sample code project
-To run this sample app, you’ll need the following:
+To run this sample app, you need the following:
 
 - A Mac with macOS 13 beta or later
 - Xcode 14 beta or later
 
-The first time you run this sample, the system prompts you to grant the app Screen Recording permission. After you grant permission, you need to restart the app to enable capture. 
+The first time you run this sample, the system prompts you to grant the app screen recording permission. After you grant permission, restart the app to enable capture. 
 
 ## Create a content filter
-Displays, running apps, and windows are the shareable content on a device. The sample uses the [`SCShareableContent`][2] class to retrieve the items in the form of [`SCDisplay`][3], [`SCRunningApplication`][4], and [`SCWindow`][5] objects respectively.
+Displays, running apps, and windows are the shareable content on a device. The sample uses the [`SCShareableContent`][2] class to retrieve these items in the form of [`SCDisplay`][3], [`SCRunningApplication`][4], and [`SCWindow`][5] instances, respectively.
 
 ``` swift
 // Retrieve the available screen content to capture.
@@ -30,6 +31,7 @@ Before the sample begins capture, it creates an [`SCContentFilter`][7] object to
 filter = SCContentFilter(desktopIndependentWindow: window)
 ```
 [View in Source][8]
+
 When a user specifies to capture the entire display, the sample creates a filter to capture only content from the main display. To illustrate filtering a running app, the sample contains a toggle to specify whether to exclude the sample app from the stream.
 
 ``` swift
@@ -49,7 +51,7 @@ filter = SCContentFilter(display: display,
 [View in Source][9]
 
 ## Create a stream configuration
-An [`SCStreamConfiguration`][10] object provides properties to configure the stream’s output size, pixel format, audio capture settings, and more. The app’s configuration throttles frame updates to 60 fps, and configures the number of frames to keep in the queue at 5. Specifying more frames uses more memory, but may allow for processing frame data without stalling the display stream. The default value is 3 and shouldn't exceed 8 frames.
+An [`SCStreamConfiguration`][10] object provides properties to configure the stream’s output size, pixel format, audio capture settings, and more. The app’s configuration throttles frame updates to 60 fps and queues five frames. Specifying more frames uses more memory, but may allow for processing frame data without stalling the display stream. The default value is three frames and shouldn't exceed eight.
 
 ``` swift
 let streamConfig = SCStreamConfiguration()
@@ -110,12 +112,18 @@ func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuff
     // Determine which type of data the sample buffer contains.
     switch outputType {
     case .screen:
-		// Process the screen content.
+        // Create a CapturedFrame structure for a video sample buffer.
+        guard let frame = createFrame(for: sampleBuffer) else { return }
+        capturedFrameHandler?(frame)
     case .audio:
-		// Process the audio content.
+        // Process audio as an AVAudioPCMBuffer for level calculation.
+        handleAudio(for: sampleBuffer)
+    @unknown default:
+        fatalError("Encountered unknown stream output type: \(outputType)")
     }
 }
 ```
+[View in Source][27]
 
 ## Process a video sample buffer
 If the sample buffer contains video data, it retrieves the sample buffer attachments that describe the output video frame.  
@@ -163,23 +171,67 @@ let frame = CapturedFrame(surface: surface,
 [View in Source][22]
 
 ## Process an audio sample buffer
-If the sample buffer contains audio, it retrieves the data as an [AudioBufferList][23] as shown below.  
+
+If the sample buffer contains audio, it processes the data as an [AudioBufferList][23] as shown below.  
 
 ``` swift
-private func createPCMBuffer(for sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
-    var ablPointer: UnsafePointer<AudioBufferList>?
-    try? sampleBuffer.withAudioBufferList { audioBufferList, blockBuffer in
-        ablPointer = audioBufferList.unsafePointer
+private func handleAudio(for buffer: CMSampleBuffer) -> Void? {
+    // Create an AVAudioPCMBuffer from an audio sample buffer.
+    try? buffer.withAudioBufferList { audioBufferList, blockBuffer in
+        guard let description = buffer.formatDescription?.audioStreamBasicDescription,
+              let format = AVAudioFormat(standardFormatWithSampleRate: description.mSampleRate, channels: description.mChannelsPerFrame),
+              let samples = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: audioBufferList.unsafePointer)
+        else { return }
+        pcmBufferHandler?(samples)
     }
-    guard let audioBufferList = ablPointer,
-          let absd = sampleBuffer.formatDescription?.audioStreamBasicDescription,
-          let format = AVAudioFormat(standardFormatWithSampleRate: absd.mSampleRate, channels: absd.mChannelsPerFrame) else { return nil }
-    return AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: audioBufferList)
 }
 ```
 [View in Source][24]
 
 The app retrieves the audio stream basic description that it uses to create an [AVAudioFormat][25]. It then uses the format and the audio buffer list to create a new instance of [AVAudioPCMBuffer][26]. If you enable audio capture in the user interface, the sample uses the buffer to calculate average levels for the captured audio to display in a simple level meter.
+
+- Important: When calling methods like [`withAudioBufferList(blockBufferMemoryAllocator:flags:body:)`][28], letting an instance of an `Unsafe` type or the pointer it refers to escape the closure can cause undefined behavior. For more unformation on working with unsafe instances in Swift, see [UnsafePointer][29] and [WWDC20 - 10648: Unsafe Swift][30].
+
+## Manage capture with the screen capture picker
+
+MacOS can manage a capture filter directly through [`SCContentSharingPicker.shared`][31]. Selecting the Activate Picker toggle in the app sets the `ScreenRecorder.isPickerActive` property.
+
+``` swift
+@Published var isPickerActive = false {
+    didSet {
+        if isPickerActive {
+            logger.info("Picker is active")
+            self.initializePickerConfiguration()
+            self.screenRecorderPicker.isActive = true
+            self.screenRecorderPicker.add(self)
+        } else {
+            logger.info("Picker is inactive")
+            self.screenRecorderPicker.isActive = false
+            self.screenRecorderPicker.remove(self)
+        }
+    }
+}
+```
+[View in Source][32]
+
+In order to get messages from the system picker, the `ScreenRecorder` class conforms to [`SCContentSharingPickerObserver`][33] and is added as an observer for the shared content picker. When the app user changes their streaming source through the picker, or ends streaming, the app handles it in the following code.
+
+``` swift
+nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
+    logger.info("Picker canceled for stream \(stream)")
+}
+
+nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
+    Task { @MainActor in
+        logger.info("Picker updated with filter=\(filter) for stream=\(stream)")
+        pickerContentFilter = filter
+        shouldUsePickerFilter = true
+        setPickerUpdate(true)
+        updateEngine()
+    }
+}
+```
+[View in Source][34]
 
 [1]:	https://developer.apple.com/documentation/screencapturekit
 [2]:	https://developer.apple.com/documentation/screencapturekit/scshareablecontent
@@ -207,3 +259,12 @@ The app retrieves the audio stream basic description that it uses to create an [
 [24]:	x-source-tag://ProcessAudioSampleBuffer
 [25]:	https://developer.apple.com/documentation/avfaudio/avaudioformat
 [26]:	https://developer.apple.com/documentation/avfaudio/avaudiopcmbuffer
+[27]:   x-source-tag://DidOutputSampleBuffer
+[28]:   https://developer.apple.com/documentation/coremedia/cmsamplebuffer/3242577-withaudiobufferlist
+[29]:   https://developer.apple.com/documentation/swift/unsafepointer
+[30]:   https://developer.apple.com/videos/play/wwdc2020/10648
+[31]:   https://developer.apple.com/documentation/screencapturekit/sccontentsharingpicker/4161033-shared
+[32]:   x-source-tag://TogglePicker
+[33]:   https://developer.apple.com/documentation/screencapturekit/sccontentsharingpickerobserver
+
+[34]:   x-source-tag://HandlePicker
